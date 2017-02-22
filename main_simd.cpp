@@ -205,30 +205,36 @@ int main()
     memset(dec_bytes, 0xcc, in_size);
 
     // try interleaved rANS encode
+    const uint32_t numLanes = 4;
     printf("\ninterleaved rANS encode:\n");
     for (int run=0; run < 5; run++) {
         double start_time = timer();
         uint64_t enc_start_time = __rdtsc();
 
-        RansWordEnc rans0 = RansWordEncInit();
-        RansWordEnc rans1 = RansWordEncInit();
+        RansWordEnc rans[numLanes];
+        for (int i=0; i < numLanes; ++i)
+            rans[i] = RansWordEncInit();
 
         uint16_t* ptr = (uint16_t *)(out_buf + out_max_size); // *end* of output buffer
 
-        // odd number of bytes?
-        if (in_size & 1) {
-            int s = in_bytes[in_size - 1];
-            RansWordEncPut(&rans0, &ptr, stats.cum_freqs[s], stats.freqs[s]);
+        // last few bytes
+        for (size_t i = in_size; i > in_size / numLanes * numLanes; --i)
+        {
+            int s = in_bytes[i - 1];
+            RansWordEncPut(&rans[(i-1) % numLanes], &ptr, stats.cum_freqs[s], stats.freqs[s]);
         }
 
-        for (size_t i=(in_size & ~1); i > 0; i -= 2) { // NB: working in reverse!
-            int s1 = in_bytes[i-1];
-            int s0 = in_bytes[i-2];
-            RansWordEncPut(&rans1, &ptr, stats.cum_freqs[s1], stats.freqs[s1]);
-            RansWordEncPut(&rans0, &ptr, stats.cum_freqs[s0], stats.freqs[s0]);
+        for (size_t i = in_size / numLanes * numLanes; i > 0; i -= numLanes) { // NB: working in reverse!
+            uint8_t sx[numLanes];
+
+            for (int j = 0; j < numLanes; ++j)
+                sx[j] = in_bytes[i - j-1];
+            for (int j = 0; j < numLanes; ++j)
+                RansWordEncPut(&rans[numLanes-1 - j], &ptr, stats.cum_freqs[sx[j]], stats.freqs[sx[j]]);
         }
-        RansWordEncFlush(&rans1, &ptr);
-        RansWordEncFlush(&rans0, &ptr);
+        for (int i = 0; i < numLanes; ++i)
+            RansWordEncFlush(&rans[numLanes-1 - i], &ptr);
+
         rans_begin = ptr;
 
         uint64_t enc_clocks = __rdtsc() - enc_start_time;
@@ -242,24 +248,29 @@ int main()
         double start_time = timer();
         uint64_t dec_start_time = __rdtsc();
 
-        RansWordDec rans0, rans1;
+        RansWordDec rans[numLanes];
         uint16_t* ptr = rans_begin;
-        RansWordDecInit(&rans0, &ptr);
-        RansWordDecInit(&rans1, &ptr);
 
-        for (size_t i=0; i < (in_size & ~1); i += 2) {
-            uint8_t s0 = RansWordDecSym(&rans0, &tab);
-            uint8_t s1 = RansWordDecSym(&rans1, &tab);
-            dec_bytes[i+0] = (uint8_t) s0;
-            dec_bytes[i+1] = (uint8_t) s1;
-            RansWordDecRenorm(&rans0, &ptr);
-            RansWordDecRenorm(&rans1, &ptr);
+        for (int i=0; i < numLanes; ++i)
+            RansWordDecInit(&rans[i], &ptr);
+
+        for (size_t i = 0; i < in_size / numLanes * numLanes; i += numLanes)
+        {
+            uint8_t sx[numLanes];
+            for (int j = 0; j < numLanes; ++j)
+                sx[j] = RansWordDecSym(&rans[j], &tab);
+            for (int j = 0; j < numLanes; ++j)
+                dec_bytes[i + j] = (uint8_t)sx[j];
+            for (int j = 0; j < numLanes; ++j)
+                RansWordDecRenorm(&rans[j], &ptr);
         }
 
-        // last byte, if number of bytes was odd
-        if (in_size & 1) {
-            uint8_t s0 = RansWordDecSym(&rans0, &tab);
-            dec_bytes[in_size - 1] = (uint8_t) s0;
+        // last few bytes
+        for (size_t i = in_size / numLanes * numLanes; i < in_size; ++i)
+        {
+            uint8_t s = RansWordDecSym(&rans[i % numLanes], &tab);
+            dec_bytes[i] = s;
+            RansWordDecRenorm(&rans[i % numLanes], &ptr);
         }
 
         uint64_t dec_clocks = __rdtsc() - dec_start_time;
